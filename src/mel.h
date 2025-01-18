@@ -15,14 +15,32 @@ typedef enum mel_return_status {
     MEL_PARSER_ERROR
 } mel_return_status_t;
 
+#define SPECIAL_CHARS \
+    X(LPAREN, '(') \
+    X(RPAREN, ')') \
+    X(SLPAREN, '[') \
+    X(SRPAREN, ']') \
+    X(CLPAREN, '{') \
+    X(CRPAREN, '}') \
+    X(SINGLE_QUOTE, '\'') \
+    X(BACK_QUOTE, '`') \
+    X(COMMA, ',') \
+    X(ARROBA, '@') \
+    X(HASH, '#') \
+    X(PERIOD, '.')
+
 typedef enum mel_token_type {
-    MEL_TOKEN_ERROR,
+    MEL_TOKEN_ERROR = 0,
     MEL_TOKEN_EOF,
-    MEL_TOKEN_LPAREN,
-    MEL_TOKEN_RPAREN,
+    
     MEL_TOKEN_ATOM,
     MEL_TOKEN_NUMBER,
-    MEL_TOKEN_STRING
+    MEL_TOKEN_STRING,
+    
+#define X(N, C) \
+    MEL_TOKEN_##N = C,
+    SPECIAL_CHARS
+#undef X
 } mel_token_type;
 
 typedef struct mel_token {
@@ -234,10 +252,11 @@ static int parser_peek_terminators(mel_parser_t *p) {
         case '\r':
         case '\n':
         case '\f':
-        case '(':
-        case ')':
-        case ';':
         case '"':
+#define X(_, C) \
+        case C:
+            SPECIAL_CHARS
+#undef X
             return 1;
         default:
             return 0;
@@ -312,7 +331,8 @@ static mel_token_t next_token(mel_parser_t *p) {
     if (parser_eof(p))
         return make_token(MEL_TOKEN_EOF, p->source, (int)(p->source - p->cursor));
     parser_update(p);
-    switch (parser_peek(p)) {
+    wchar_t c = parser_peek(p);
+    switch (c) {
         case ';':
             skip_line(p);
             return next_token(p);
@@ -320,10 +340,11 @@ static mel_token_t next_token(mel_parser_t *p) {
             return read_string(p);
         case '0' ... '9':
             return read_number(p);
-        case '(':
-            return single_token(p, MEL_TOKEN_LPAREN);
-        case ')':
-            return single_token(p, MEL_TOKEN_RPAREN);
+#define X(N, _) \
+        case MEL_TOKEN_##N:
+            SPECIAL_CHARS
+#undef X
+            return single_token(p, (mel_token_type)c);
         default:
             return read_atom(p);
     }
@@ -336,16 +357,17 @@ static const char *token_str(mel_token_type type) {
             return "ERROR";
         case MEL_TOKEN_EOF:
             return "EOF";
-        case MEL_TOKEN_LPAREN:
-            return "LPAREN";
-        case MEL_TOKEN_RPAREN:
-            return "RPAREN";
         case MEL_TOKEN_ATOM:
             return "ATOM";
         case MEL_TOKEN_NUMBER:
             return "NUMBER";
         case MEL_TOKEN_STRING:
             return "STRING";
+#define X(N, _) \
+        case MEL_TOKEN_##N:\
+            return #N;
+            SPECIAL_CHARS
+#undef X
     }
 }
 
@@ -367,11 +389,7 @@ mel_return_status_t mel_parse(mel_t *mel, const unsigned char *str, int str_leng
             case MEL_TOKEN_ERROR:
             case MEL_TOKEN_EOF:
                 goto BAIL;
-            case MEL_TOKEN_LPAREN:
-            case MEL_TOKEN_RPAREN:
-            case MEL_TOKEN_ATOM:
-            case MEL_TOKEN_NUMBER:
-            case MEL_TOKEN_STRING:
+            default:
                 print_token(&token);
                 break;
         }
