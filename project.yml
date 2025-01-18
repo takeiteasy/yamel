@@ -1,0 +1,25 @@
+name: mel
+
+options:
+  bundleIdPrefix: io.github.takeiteasy
+  createIntermediateGroups: true
+  deploymentTarget:
+    macOS: "15.0"
+
+settings:
+  GCC_C_LANGUAGE_STANDARD: c11
+  CLANG_WARN_DOCUMENTATION_COMMENTS: false
+
+targets:
+  mel:
+    type: tool
+    platform: macOS
+    sources:
+      - path: src/
+      - path: t/
+      - path: Makefile
+        type: folder
+      - path: README.md
+        type: folder
+      - path: project.yml
+        type: folder
