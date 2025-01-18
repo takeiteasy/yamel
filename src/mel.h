@@ -16,7 +16,8 @@ typedef enum mel_return_status {
     MEL_LEXER_ERROR
 } mel_return_status_t;
 
-#define PAREN_CHARS \
+#define SIMPLE_CHARS \
+    X(PERIOD, '.') \
     X(LPAREN, '(') \
     X(RPAREN, ')') \
     X(SLPAREN, '[') \
@@ -30,7 +31,6 @@ typedef enum mel_return_status {
     X(COMMA, ',') \
     X(ARROBA, '@') \
     X(HASH, '#') \
-    X(PERIOD, '.') \
     X(SYMBOL, ':')
 
 typedef enum mel_token_type {
@@ -43,7 +43,7 @@ typedef enum mel_token_type {
     
 #define X(N, C) \
     MEL_TOKEN_##N = C,
-    PAREN_CHARS
+    SIMPLE_CHARS
     PREFIX_CHARS
 #undef X
 } mel_token_type;
@@ -52,12 +52,16 @@ typedef struct mel_token {
     mel_token_type type;
     const wchar_t *cursor;
     int length;
+    int line;
+    int position;
 } mel_token_t;
 
 typedef struct mel_parser {
     const wchar_t *source;
     const wchar_t *cursor;
     mel_token_t *tokens;
+    int current_line;
+    int line_position;
 } mel_parser_t;
 
 typedef enum mel_op {
@@ -84,16 +88,12 @@ mel_return_status_t mel_lexer(mel_parser_t *p, mel_ast_t **ast);
 #endif // MEL_HEADER
 
 #ifdef MEL_IMPLEMENTATION
-
 #define __garry_raw(a)           ((int*)(void*)(a)-2)
 #define __garry_m(a)             __garry_raw(a)[0]
 #define __garry_n(a)             __garry_raw(a)[1]
 #define __garry_needgrow(a,n)    ((a)==0 || __garry_n(a)+(n) >= __garry_m(a))
 #define __garry_maybegrow(a,n)   (__garry_needgrow(a,(n)) ? __garry_grow(a,n) : 0)
 #define __garry_grow(a,n)        (*((void **)&(a)) = __garry_growf((a), (n), sizeof(*(a))))
-#define __garry_needshrink(a)    (__garry_m(a) > 4 && __garry_n(a) <= __garry_m(a) / 4)
-#define __garry_maybeshrink(a)   (__garry_needshrink(a) ? __garry_shrink(a) : 0)
-#define __garry_shrink(a)        (*((void **)&(a)) = __garry_shrinkf((a), sizeof(*(a))))
 #define garry_free(a)           ((a) ? free(__garry_raw(a)),((a)=NULL) : 0)
 #define garry_append(a,v)       (__garry_maybegrow(a,1), (a)[__garry_n(a)++] = (v))
 #define garry_count(a)          ((a) ? __garry_n(a) : 0)
@@ -110,41 +110,6 @@ static void *__garry_growf(void *arr, int increment, int itemsize) {
         return p + 2;
     }
     return NULL;
-}
-
-static void *__garry_shrinkf(void *arr, int itemsize) {
-    int new_capacity = __garry_m(arr) / 2;
-    int *p = realloc(arr ? __garry_raw(arr) : 0, itemsize * new_capacity + sizeof(int) * 2);
-    if (p) {
-        p[0] = new_capacity;
-        return p + 2;
-    }
-    return NULL;
-}
-
-#ifndef _WIN32
-static int _vscprintf(const char *format, va_list args) {
-    va_list copy;
-    va_copy(copy, args);
-    int retval = vsnprintf(NULL, 0, format, copy);
-    va_end(copy);
-    return retval;
-}
-#endif
-
-static char* format(const char *fmt, size_t *size, ...) {
-    va_list args;
-    va_start(args, size);
-    size_t _size = _vscprintf(fmt, args);
-    char *result = malloc(_size + 1 * sizeof(char));
-    if (!result)
-        return NULL;
-    vsnprintf(result, _size, fmt, args);
-    result[_size] = '\0';
-    va_end(args);
-    if (size)
-        *size = _size;
-    return result;
 }
 
 static int read_wide(const unsigned char* str, wchar_t* char_out) {
@@ -190,7 +155,7 @@ static wchar_t *to_wide(const unsigned char *str, int str_length) {
 }
 
 static wchar_t parser_peek(mel_parser_t *p) {
-    return p->cursor[0];
+    return *p->cursor;
 }
 
 static wchar_t parser_eof(mel_parser_t *p) {
@@ -201,9 +166,33 @@ static inline void parser_update(mel_parser_t *p) {
     p->source = p->cursor;
 }
 
+static inline wchar_t parser_next(mel_parser_t *p) {
+    return parser_eof(p) ? L'\0' : *(p->cursor + 1);
+}
+
 static inline wchar_t parser_advance(mel_parser_t *p) {
     wchar_t current = *p->cursor;
-    p->cursor++;
+    switch (current) {
+        case '\r':
+            if (parser_next(p) == '\n') {
+                p->cursor += 2;
+                p->current_line++;
+                p->line_position = 0;
+            } else {
+                p->cursor++;
+                p->line_position++;
+            }
+            break;
+        case '\n':
+            p->cursor++;
+            p->current_line++;
+            p->line_position = 0;
+            break;
+        default:
+            p->cursor++;
+            p->line_position++;
+            break;
+    }
     return current;
 }
 
@@ -213,38 +202,41 @@ static inline wchar_t parser_skip(mel_parser_t *p) {
     return ret;
 }
 
-static inline wchar_t parser_next(mel_parser_t *p) {
-    return parser_eof(p) ? L'\0' : *(p->cursor + 1);
-}
-
-static inline mel_token_t make_token(mel_token_type type, const wchar_t *cursor, int length) {
+static inline mel_token_t make_token(mel_token_type type, const wchar_t *cursor, int length, int line, int line_position) {
     return (mel_token_t) {
         .type = type,
         .cursor = cursor,
-        .length = length
+        .length = length,
+        .line = line,
+        .position = line_position - length
     };
 }
 
-#define TOKEN(T) (make_token((T), p->source, (int)(p->cursor - p->source)))
+#define TOKEN(T) (make_token((T), p->source, (int)(p->cursor - p->source), p->current_line, p->line_position))
 
-static int parser_peek_nl(mel_parser_t *p) {
+static int parser_peek_newline(mel_parser_t *p) {
     switch (parser_peek(p)) {
         case '\r':
-            return parser_next(p) == '\n';
+            return parser_next(p) == '\n' ? 2 : 0;
         case '\n':
             return 1;
     }
     return 0;
 }
 
+#define WHITESPACE \
+    X(' ') \
+    X('\t') \
+    X('\v') \
+    X('\r') \
+    X('\n') \
+    X('\f')
+
 static int is_whitespace(wchar_t c) {
     switch (c) {
-        case ' ':
-        case '\t':
-        case '\v':
-        case '\r':
-        case '\n':
-        case '\f':
+#define X(C) case C:
+            WHITESPACE
+#undef X
             return 1;
         default:
             return 0;
@@ -253,17 +245,14 @@ static int is_whitespace(wchar_t c) {
 
 static int parser_peek_terminators(mel_parser_t *p) {
     switch (parser_peek(p)) {
-        case ' ':
-        case '\t':
-        case '\v':
-        case '\r':
-        case '\n':
-        case '\f':
-        case '"':
+#define X(C) case C:
+            WHITESPACE
+#undef X
 #define X(_, C) \
         case C:
-            PAREN_CHARS
+            SIMPLE_CHARS
 #undef X
+        case '"':
             return 1;
         default:
             return 0;
@@ -276,27 +265,18 @@ static int parser_peek_digit(mel_parser_t *p) {
 }
 
 static void skip_line(mel_parser_t *p) {
-    while (!parser_peek_nl(p))
+    while (!parser_peek_newline(p))
         parser_advance(p);
 }
 
+static inline int parser_peek_whitespace(mel_parser_t *p) {
+    return is_whitespace(parser_peek(p));
+}
+
 static void skip_whitespace(mel_parser_t *p) {
-    for (;;) {
-        if (parser_eof(p))
-            return;
-        switch (parser_peek(p)) {
-            case ' ':
-            case '\t':
-            case '\v':
-            case '\r':
-            case '\n':
-            case '\f':
-                parser_advance(p);
-                break;
-            default:
-                return;
-        }
-    }
+    while (!parser_eof(p) && parser_peek_whitespace(p))
+        parser_advance(p);
+    parser_update(p);
 }
 
 static mel_token_t read_number(mel_parser_t *p) {
@@ -334,10 +314,10 @@ static inline mel_token_t single_token(mel_parser_t *p, mel_token_type type) {
 }
 
 static mel_token_t next_token(mel_parser_t *p) {
+    parser_update(p);
     skip_whitespace(p);
     if (parser_eof(p))
-        return make_token(MEL_TOKEN_EOF, p->source, (int)(p->source - p->cursor));
-    parser_update(p);
+        return TOKEN(MEL_TOKEN_EOF);
     wchar_t c = parser_peek(p);
     switch (c) {
         case ';':
@@ -355,7 +335,7 @@ static mel_token_t next_token(mel_parser_t *p) {
                 return TOKEN(MEL_TOKEN_ERROR);
 #define X(N, _) \
         case MEL_TOKEN_##N:
-            PAREN_CHARS
+            SIMPLE_CHARS
 #undef X
             return single_token(p, (mel_token_type)c);
         default:
@@ -379,14 +359,14 @@ static const char *token_str(mel_token_type type) {
 #define X(N, _) \
         case MEL_TOKEN_##N:\
             return #N;
-            PAREN_CHARS
+            SIMPLE_CHARS
             PREFIX_CHARS
 #undef X
     }
 }
 
 static void print_token(mel_token_t *token) {
-    wprintf(L"[MEL_TOKEN_%s] '%.*ls'\n", token_str(token->type), token->length, token->cursor);
+    wprintf(L"(MEL_TOKEN_%s, \"%.*ls\", %d:%d)\n", token_str(token->type), token->length, token->cursor, token->line, token->position);
 }
 
 mel_return_status_t mel_parse(mel_parser_t *p, const unsigned char *str, int str_length) {
@@ -430,7 +410,7 @@ mel_return_status_t mel_lexer(mel_parser_t *p, mel_ast_t **ast) {
     while (!lexer_eol(&lexer)) {
         switch (lexer_peek(&lexer)->type) {
             case MEL_TOKEN_ERROR:
-                abort(); // ???
+                abort(); // should never happen
             case MEL_TOKEN_EOF:
                 return MEL_OK;
             case MEL_TOKEN_ATOM:
