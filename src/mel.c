@@ -29,12 +29,19 @@ BAIL:
 }
 
 int main(int argc, const char *argv[]) {
-    mel_t mel;
-    mel_init(&mel);
+#ifdef __APPLE__
+    // XCode won't print wprintf otherwise...
+    setlocale(LC_ALL, "en_US.UTF-8");
+#else
+    setlocale(LC_ALL, "");
+#endif
     int src_length;
     const unsigned char *src = read_file("t/test.lisp", &src_length);
-    mel_token_t *tokens = NULL;
-    if (mel_parse(&mel, src, src_length, &tokens) != MEL_OK)
+    mel_parser_t parser = {0};
+    if (mel_parse(&parser, src, src_length) != MEL_OK)
+        abort();
+    mel_ast_t *ast = NULL;
+    if (mel_lexer(&parser, &ast) != MEL_OK || !ast)
         abort();
     free((void*)src);
     return 0;

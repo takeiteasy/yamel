@@ -12,22 +12,26 @@ extern "C" {
 
 typedef enum mel_return_status {
     MEL_OK,
-    MEL_PARSER_ERROR
+    MEL_PARSER_ERROR,
+    MEL_LEXER_ERROR
 } mel_return_status_t;
 
-#define SPECIAL_CHARS \
+#define PAREN_CHARS \
     X(LPAREN, '(') \
     X(RPAREN, ')') \
     X(SLPAREN, '[') \
     X(SRPAREN, ']') \
     X(CLPAREN, '{') \
-    X(CRPAREN, '}') \
+    X(CRPAREN, '}')
+
+#define PREFIX_CHARS \
     X(SINGLE_QUOTE, '\'') \
     X(BACK_QUOTE, '`') \
     X(COMMA, ',') \
     X(ARROBA, '@') \
     X(HASH, '#') \
-    X(PERIOD, '.')
+    X(PERIOD, '.') \
+    X(SYMBOL, ':')
 
 typedef enum mel_token_type {
     MEL_TOKEN_ERROR = 0,
@@ -39,7 +43,8 @@ typedef enum mel_token_type {
     
 #define X(N, C) \
     MEL_TOKEN_##N = C,
-    SPECIAL_CHARS
+    PAREN_CHARS
+    PREFIX_CHARS
 #undef X
 } mel_token_type;
 
@@ -52,15 +57,26 @@ typedef struct mel_token {
 typedef struct mel_parser {
     const wchar_t *source;
     const wchar_t *cursor;
+    mel_token_t *tokens;
 } mel_parser_t;
 
-typedef struct mel {
-    
-} mel_t;
+typedef enum mel_op {
+    MEL_OP_RETURN
+} mel_op;
 
-void mel_init(mel_t *mel);
+typedef struct mel_ast {
+    mel_token_t *token;
+    struct mel_ast *left, *right;
+} mel_ast_t;
 
-mel_return_status_t mel_parse(mel_t *mel, const unsigned char *str, int str_length, mel_token_t **tokens);
+typedef struct mel_lexer {
+    mel_token_t *tokens;
+    int token_count;
+    int cursor;
+} mel_lexer_t;
+
+mel_return_status_t mel_parse(mel_parser_t *p, const unsigned char *str, int str_length);
+mel_return_status_t mel_lexer(mel_parser_t *p, mel_ast_t **ast);
 
 #ifdef __cplusplus
 }
@@ -173,15 +189,6 @@ static wchar_t *to_wide(const unsigned char *str, int str_length) {
     return ret;
 }
 
-void mel_init(mel_t *mel) {
-#ifdef __APPLE__
-    // XCode won't print wprintf otherwise...
-    setlocale(LC_ALL, "en_US.UTF-8");
-#else
-    setlocale(LC_ALL, "");
-#endif
-}
-
 static wchar_t parser_peek(mel_parser_t *p) {
     return p->cursor[0];
 }
@@ -230,8 +237,8 @@ static int parser_peek_nl(mel_parser_t *p) {
     return 0;
 }
 
-static int parser_peek_whitespace(mel_parser_t *p) {
-    switch (parser_peek(p)) {
+static int is_whitespace(wchar_t c) {
+    switch (c) {
         case ' ':
         case '\t':
         case '\v':
@@ -255,7 +262,7 @@ static int parser_peek_terminators(mel_parser_t *p) {
         case '"':
 #define X(_, C) \
         case C:
-            SPECIAL_CHARS
+            PAREN_CHARS
 #undef X
             return 1;
         default:
@@ -342,7 +349,13 @@ static mel_token_t next_token(mel_parser_t *p) {
             return read_number(p);
 #define X(N, _) \
         case MEL_TOKEN_##N:
-            SPECIAL_CHARS
+            PREFIX_CHARS
+#undef X
+            if (is_whitespace(parser_next(p)))
+                return TOKEN(MEL_TOKEN_ERROR);
+#define X(N, _) \
+        case MEL_TOKEN_##N:
+            PAREN_CHARS
 #undef X
             return single_token(p, (mel_token_type)c);
         default:
@@ -366,7 +379,8 @@ static const char *token_str(mel_token_type type) {
 #define X(N, _) \
         case MEL_TOKEN_##N:\
             return #N;
-            SPECIAL_CHARS
+            PAREN_CHARS
+            PREFIX_CHARS
 #undef X
     }
 }
@@ -375,26 +389,84 @@ static void print_token(mel_token_t *token) {
     wprintf(L"[MEL_TOKEN_%s] '%.*ls'\n", token_str(token->type), token->length, token->cursor);
 }
 
-mel_return_status_t mel_parse(mel_t *mel, const unsigned char *str, int str_length, mel_token_t **tokens) {
+mel_return_status_t mel_parse(mel_parser_t *p, const unsigned char *str, int str_length) {
     const wchar_t *wide_str = to_wide(str, str_length);
-    
-    mel_parser_t p = {
-        .source = wide_str,
-        .cursor = wide_str
-    };
+    p->source = wide_str;
+    p->cursor = wide_str;
     for (;;) {
-        mel_token_t token = next_token(&p);
-        garry_append(*tokens, token);
+        mel_token_t token = next_token(p);
+        garry_append(p->tokens, token);
         switch (token.type) {
             case MEL_TOKEN_ERROR:
+                return MEL_PARSER_ERROR;
             case MEL_TOKEN_EOF:
-                goto BAIL;
+                return MEL_OK;
             default:
                 print_token(&token);
                 break;
         }
     }
-BAIL:
+}
+
+static inline int lexer_eol(mel_lexer_t *l) {
+    return l->cursor >= l->token_count;
+}
+
+static mel_token_t* lexer_peek(mel_lexer_t *l) {
+    return &l->tokens[l->cursor];
+}
+
+static mel_token_t* lexer_next(mel_lexer_t *l) {
+    return l->cursor + 1 >= l->token_count ? NULL : &l->tokens[l->cursor];
+}
+
+mel_return_status_t mel_lexer(mel_parser_t *p, mel_ast_t **ast) {
+    mel_lexer_t lexer = {
+        .tokens = p->tokens,
+        .token_count = garry_count(p->tokens),
+        .cursor = 0
+    };
+    
+    while (!lexer_eol(&lexer)) {
+        switch (lexer_peek(&lexer)->type) {
+            case MEL_TOKEN_ERROR:
+                abort(); // ???
+            case MEL_TOKEN_EOF:
+                return MEL_OK;
+            case MEL_TOKEN_ATOM:
+                break;
+            case MEL_TOKEN_NUMBER:
+                break;
+            case MEL_TOKEN_STRING:
+                break;
+            case MEL_TOKEN_LPAREN:
+                break;
+            case MEL_TOKEN_RPAREN:
+                break;
+            case MEL_TOKEN_SLPAREN:
+                break;
+            case MEL_TOKEN_SRPAREN:
+                break;
+            case MEL_TOKEN_CLPAREN:
+                break;
+            case MEL_TOKEN_CRPAREN:
+                break;
+            case MEL_TOKEN_SINGLE_QUOTE:
+                break;
+            case MEL_TOKEN_BACK_QUOTE:
+                break;
+            case MEL_TOKEN_COMMA:
+                break;
+            case MEL_TOKEN_ARROBA:
+                break;
+            case MEL_TOKEN_HASH:
+                break;
+            case MEL_TOKEN_PERIOD:
+                break;
+            case MEL_TOKEN_SYMBOL:
+                break;
+        }
+    }
     return MEL_OK;
 }
 #endif
