@@ -115,7 +115,7 @@ static void *__garry_growf(void *arr, int increment, int itemsize) {
     int dbl_cur = arr ? 2 * __garry_m(arr) : 0;
     int min_needed = garry_count(arr) + increment;
     int m = dbl_cur > min_needed ? dbl_cur : min_needed;
-    int *p = realloc(arr ? __garry_raw(arr) : 0, itemsize * m + sizeof(int) * 2);
+    int *p = realloc(arr ? __garry_raw(arr) : 0, (itemsize * m) + (sizeof(int) * 2));
     if (p) {
         if (!arr)
             p[1] = 0;
@@ -127,7 +127,7 @@ static void *__garry_growf(void *arr, int increment, int itemsize) {
 
 typedef struct trie {
     struct trie *children[26];
-    int child;
+    int ischild;
 } trie;
 
 static trie* trie_create(void) {
@@ -160,8 +160,19 @@ static trie* trie_insert(trie *root, const char *word) {
                 return NULL;
         }
     }
-    cursor->child = 1;
+    cursor->ischild = 1;
     return root;
+}
+
+static int trie_find(trie* root, const char* word) {
+    trie* temp = root;
+    for(int i = 0; word[i] != '\0'; i++) {
+        int position = word[i] - 'a';
+        if (!temp->children[position])
+            return 0;
+        temp = temp->children[position];
+    }
+    return temp != NULL && temp->ischild == 1;
 }
 
 static void MM86128(const void *key, const int len, uint32_t seed, void *out) {
@@ -282,7 +293,7 @@ static int wide_length(const unsigned char *str, int str_length) {
 }
 
 static wchar_t *to_wide(const unsigned char *str, int str_length, int *out_length) {
-    wchar_t *ret = malloc(sizeof(wchar_t) * wide_length(str, str_length));
+    wchar_t *ret = malloc(sizeof(wchar_t) * (wide_length(str, str_length) + 1));
     const unsigned char *cursor = str;
     int length = 0, counter = 0;
     while (cursor[0] != L'\0' && counter < str_length) {
@@ -290,8 +301,9 @@ static wchar_t *to_wide(const unsigned char *str, int str_length, int *out_lengt
         length += cl;
         cursor += cl;
     }
+    ret[counter] = '\0';
     if (out_length)
-        *out_length = counter - 1;
+        *out_length = counter;
     return ret;
 }
 
@@ -606,13 +618,13 @@ void mel_obj_destroy(mel_object_t *obj) {
 }
 
 mel_string_t* mel_string_new(const wchar_t *chars, int length, bool owns_chars) {
-    mel_string_t *result = malloc(sizeof(mel_string_t) + length + 1);
+    mel_string_t *result = malloc(sizeof(mel_string_t));
     result->obj.type = MEL_OBJECT_STRING;
     result->length = length;
-    if (chars && length) {
-        memcpy(result->chars, chars, length * sizeof(wchar_t));
-        result->chars[length] = '\0';
-    }
+//    if (chars && length) {
+//        memcpy(result->chars, chars, length * sizeof(wchar_t));
+//        result->chars[length] = '\0';
+//    }
     return result;
 }
 
@@ -787,18 +799,47 @@ static void chunk_write_constant(mel_chunk_t *chunk, mel_value_t value, int line
     X(HASH, '#') \
     X(SYMBOL, ':')
 
+#define PRIMITIVES \
+    X(QUOTE, "QUOTE") \
+    X(SETQ, "SETQ") \
+    X(PROGN, "PROGN") \
+    X(IF, "IF") \
+    X(COND, "COND") \
+    X(LAMBDA, "LAMBDA") \
+    X(MACRO, "MACRO") \
+    X(ATOM, "ATOM") \
+    X(EQ, "EQ") \
+    X(CAR, "CAR") \
+    X(CDR, "CDR") \
+    X(CONS, "CONS") \
+    X(PRINT, "PRINT") \
+    X(ASSIGN, "=") \
+    X(LT_EQ, "<=") \
+    X(GT_EQ, ">=")
+
+#define BIN_OPS \
+    X(ADD, '+') \
+    X(SUB, '-') \
+    X(MUL, '*') \
+    X(DIV, '/') \
+    X(LT,  '<') \
+    X(GT,  '>')
+
 typedef enum mel_token_type {
     MEL_TOKEN_ERROR = 0,
     MEL_TOKEN_EOF,
-    
-    MEL_TOKEN_ATOM,
+    MEL_TOKEN_PRIMITIVE,
     MEL_TOKEN_NUMBER,
     MEL_TOKEN_STRING,
-    
+#define X(N, _) \
+    MEL_TOKEN_##N,
+    PRIMITIVES
+#undef X
 #define X(N, C) \
     MEL_TOKEN_##N = C,
     SIMPLE_CHARS
     PREFIX_CHARS
+    BIN_OPS
 #undef X
 } mel_token_type;
 
@@ -817,7 +858,26 @@ typedef struct mel_lexer {
     int line_position;
     mel_token_t current;
     mel_token_t previous;
+    trie *primitives;
 } mel_lexer_t;
+
+static void lexer_init(mel_lexer_t *l, const unsigned char *str, int str_length) {
+    const wchar_t *wide_str = to_wide(str, str_length, NULL);
+    l->source = wide_str;
+    l->cursor = wide_str;
+    l->primitives = trie_create();
+#define X(N, S) \
+    trie_insert(l->primitives, S);
+    PRIMITIVES
+#undef X
+}
+
+static void lexer_free(mel_lexer_t *l) {
+    if (l->source)
+        free((void*)l->source);
+    if (l->primitives)
+        trie_destroy(l->primitives);
+}
 
 static wchar_t lexer_peek(mel_lexer_t *p) {
     return *p->cursor;
@@ -967,10 +1027,21 @@ BAIL:
     return ret;
 }
 
+static mel_token_type identify(mel_lexer_t *l) {
+    int len = (int)(l->cursor - l->source);
+    char *buf = malloc(sizeof(char) * len + 1);
+    for (int i = 0; i < len; i++)
+        buf[i] = *(l->source + i);
+    buf[len] = '\0';
+    int found = trie_find(l->primitives, buf);
+    free(buf);
+    return found ? MEL_TOKEN_PRIMITIVE : MEL_TOKEN_ATOM;
+}
+
 static mel_token_t read_atom(mel_lexer_t *p) {
     while (!lexer_eof(p) && !lexer_peek_terminators(p))
         lexer_advance(p);
-    return TOKEN(MEL_TOKEN_ATOM);
+    return TOKEN(identify(p));
 }
 
 static inline mel_token_t single_token(mel_lexer_t *p, mel_token_type type) {
@@ -1001,6 +1072,7 @@ static mel_token_t next_token(mel_lexer_t *p) {
 #define X(N, _) \
         case MEL_TOKEN_##N:
             SIMPLE_CHARS
+            BIN_OPS
 #undef X
             return single_token(p, (mel_token_type)c);
         default:
@@ -1015,8 +1087,8 @@ static const char *token_str(mel_token_type type) {
             return "ERROR";
         case MEL_TOKEN_EOF:
             return "EOF";
-        case MEL_TOKEN_ATOM:
-            return "ATOM";
+        case MEL_TOKEN_PRIMITIVE:
+            return "PRIMITIVE";
         case MEL_TOKEN_NUMBER:
             return "NUMBER";
         case MEL_TOKEN_STRING:
@@ -1026,6 +1098,8 @@ static const char *token_str(mel_token_type type) {
             return #N;
             SIMPLE_CHARS
             PREFIX_CHARS
+            PRIMITIVES
+            BIN_OPS
 #undef X
     }
 }
@@ -1103,11 +1177,8 @@ mel_result mel_exec(mel_vm_t *vm, const unsigned char *str, int str_length) {
     mel_result ret = MEL_COMPILE_ERROR;
     if (!str || !str_length)
         goto BAIL;
-    const wchar_t *wide_str = to_wide(str, str_length, NULL);
-    mel_lexer_t lexer = {
-        .source = wide_str,
-        .cursor = wide_str,
-    };
+    mel_lexer_t lexer = {0};
+    lexer_init(&lexer, str, str_length);
     mel_chunk_t chunk;
     chunk_init(&chunk);
     if (mel_compile(&lexer, &chunk) != MEL_OK)
@@ -1117,6 +1188,7 @@ mel_result mel_exec(mel_vm_t *vm, const unsigned char *str, int str_length) {
     vm->sp = vm->chunk->data;
     ret = MEL_OK;
 BAIL:
+    lexer_free(&lexer);
     chunk_free(&chunk);
     return ret;
 }
