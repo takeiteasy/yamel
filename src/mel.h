@@ -42,8 +42,7 @@ typedef struct mel_object {
 typedef struct {
     mel_object_t obj;
     int length;
-    bool owns_chars;
-    wchar_t chars[];
+    wchar_t *chars;
 } mel_string_t;
 
 typedef struct mel_chunk mel_chunk_t;
@@ -609,8 +608,7 @@ void mel_obj_destroy(mel_object_t *obj) {
     switch (obj->type) {
         case MEL_OBJECT_STRING: {
             mel_string_t* string = (mel_string_t*)obj;
-            if (string->owns_chars)
-                free((char*)string->chars);
+            free((void*)string->chars);
             free(string);
             break;
         }
@@ -619,12 +617,16 @@ void mel_obj_destroy(mel_object_t *obj) {
 
 mel_string_t* mel_string_new(const wchar_t *chars, int length, bool owns_chars) {
     mel_string_t *result = malloc(sizeof(mel_string_t));
+    if (!result)
+        return NULL;
     result->obj.type = MEL_OBJECT_STRING;
     result->length = length;
-//    if (chars && length) {
-//        memcpy(result->chars, chars, length * sizeof(wchar_t));
-//        result->chars[length] = '\0';
-//    }
+    if (!(result->chars = malloc(sizeof(wchar_t) * (length + 1)))) {
+        free(result);
+        return NULL;
+    }
+    memcpy(result->chars, chars, length * sizeof(wchar_t));
+    result->chars[length] = L'\0';
     return result;
 }
 
@@ -884,7 +886,7 @@ static wchar_t lexer_peek(mel_lexer_t *p) {
 }
 
 static wchar_t lexer_eof(mel_lexer_t *p) {
-    return lexer_peek(p) == '\0';
+    return lexer_peek(p) == L'\0';
 }
 
 static inline void lexer_update(mel_lexer_t *p) {
