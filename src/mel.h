@@ -6,12 +6,10 @@ extern "C" {
 #include <wchar.h>
 #include <stdbool.h>
 
-typedef unsigned long long mel_int;
 typedef double mel_float;
 
 #define TYPES \
     X(BOOLEAN, boolean, bool) \
-    X(INTEGER, integer, mel_int) \
     X(NUMBER, number, mel_float) \
     X(OBJECT, obj, void*)
 
@@ -49,7 +47,7 @@ typedef struct mel_chunk mel_chunk_t;
 
 typedef struct mel_vm {
     mel_chunk_t *chunk;
-    unsigned char *sp;
+    unsigned char *pc;
     mel_value_t *stack;
     mel_value_t current;
     mel_value_t previous;
@@ -105,10 +103,14 @@ mel_result mel_exec_file(mel_vm_t *vm, const char *path);
 #define __garry_needgrow(a,n)    ((a)==0 || __garry_n(a)+(n) >= __garry_m(a))
 #define __garry_maybegrow(a,n)   (__garry_needgrow(a,(n)) ? __garry_grow(a,n) : 0)
 #define __garry_grow(a,n)        (*((void **)&(a)) = __garry_growf((a), (n), sizeof(*(a))))
+#define __garry_needshrink(a)    (__garry_m(a) > 4 && __garry_n(a) <= __garry_m(a) / 4)
+#define __garry_maybeshrink(a)   (__garry_needshrink(a) ? __garry_shrink(a) : 0)
+#define __garry_shrink(a)        (*((void **)&(a)) = __garry_shrinkf((a), sizeof(*(a))))
 #define garry_free(a)           ((a) ? free(__garry_raw(a)),((a)=NULL) : 0)
 #define garry_append(a,v)       (__garry_maybegrow(a,1), (a)[__garry_n(a)++] = (v))
 #define garry_count(a)          ((a) ? __garry_n(a) : 0)
 #define garry_last(a)           (void*)((a) ? &(a)[__garry_n(a)-1] : NULL)
+#define garry_pop(a)            (--__garry_n(a), __garry_maybeshrink(a))
 
 static void *__garry_growf(void *arr, int increment, int itemsize) {
     int dbl_cur = arr ? 2 * __garry_m(arr) : 0;
@@ -119,6 +121,16 @@ static void *__garry_growf(void *arr, int increment, int itemsize) {
         if (!arr)
             p[1] = 0;
         p[0] = m;
+        return p + 2;
+    }
+    return NULL;
+}
+
+static void *__garry_shrinkf(void *arr, int itemsize) {
+    int new_capacity = __garry_m(arr) / 2;
+    int *p = realloc(arr ? __garry_raw(arr) : 0, itemsize * new_capacity + sizeof(int) * 2);
+    if (p) {
+        p[0] = new_capacity;
         return p + 2;
     }
     return NULL;
@@ -166,7 +178,17 @@ static trie* trie_insert(trie *root, const char *word) {
 static int trie_find(trie* root, const char* word) {
     trie* temp = root;
     for(int i = 0; word[i] != '\0'; i++) {
-        int position = word[i] - 'a';
+        int position = word[i];
+        switch (word[i]) {
+            case 'a' ... 'z':
+                position -= 'a';
+                break;
+            case 'A' ... 'Z':
+                position -= 'A';
+                break;
+            default:
+                return 0;
+        }
         if (!temp->children[position])
             return 0;
         temp = temp->children[position];
@@ -638,9 +660,6 @@ void mel_print_value(mel_value_t value) {
         case MEL_VALUE_BOOLEAN:
             printf("%s", value.as.boolean ? "T" : "NIL");
             break;
-        case MEL_VALUE_INTEGER:
-            printf("%llu", mel_as_integer(value));
-            break;
         case MEL_VALUE_NUMBER:
             printf("%g", mel_as_number(value));
             break;
@@ -802,6 +821,9 @@ static void chunk_write_constant(mel_chunk_t *chunk, mel_value_t value, int line
     X(SYMBOL, ':')
 
 #define PRIMITIVES \
+    X(TRUE, "TRUE") \
+    X(FALSE, "FALSE") \
+    X(NIL, "NIL") \
     X(QUOTE, "QUOTE") \
     X(SETQ, "SETQ") \
     X(PROGN, "PROGN") \
@@ -815,7 +837,8 @@ static void chunk_write_constant(mel_chunk_t *chunk, mel_value_t value, int line
     X(CDR, "CDR") \
     X(CONS, "CONS") \
     X(PRINT, "PRINT") \
-    X(ASSIGN, "=") \
+    X(AND, "AND") \
+    X(OR, "OR") \
     X(LT_EQ, "<=") \
     X(GT_EQ, ">=")
 
@@ -830,7 +853,6 @@ static void chunk_write_constant(mel_chunk_t *chunk, mel_value_t value, int line
 typedef enum mel_token_type {
     MEL_TOKEN_ERROR = 0,
     MEL_TOKEN_EOF,
-    MEL_TOKEN_PRIMITIVE,
     MEL_TOKEN_NUMBER,
     MEL_TOKEN_STRING,
 #define X(N, _) \
@@ -1033,11 +1055,23 @@ static mel_token_type identify(mel_lexer_t *l) {
     int len = (int)(l->cursor - l->source);
     char *buf = malloc(sizeof(char) * len + 1);
     for (int i = 0; i < len; i++)
-        buf[i] = *(l->source + i);
+        buf[i] = toupper(*(l->source + i));
     buf[len] = '\0';
+    mel_token_type ret = MEL_TOKEN_ATOM;
     int found = trie_find(l->primitives, buf);
-    free(buf);
-    return found ? MEL_TOKEN_PRIMITIVE : MEL_TOKEN_ATOM;
+    if (!found)
+        goto BAIL;
+#define X(N, S) \
+    if (!strncmp(buf, S, len)) { \
+        ret = MEL_TOKEN_##N; \
+        goto BAIL; \
+    }
+    PRIMITIVES
+#undef X
+BAIL:
+    if (buf)
+        free(buf);
+    return ret;
 }
 
 static mel_token_t read_atom(mel_lexer_t *p) {
@@ -1089,8 +1123,6 @@ static const char *token_str(mel_token_type type) {
             return "ERROR";
         case MEL_TOKEN_EOF:
             return "EOF";
-        case MEL_TOKEN_PRIMITIVE:
-            return "PRIMITIVE";
         case MEL_TOKEN_NUMBER:
             return "NUMBER";
         case MEL_TOKEN_STRING:
@@ -1110,29 +1142,78 @@ static void print_token(mel_token_t *token) {
     wprintf(L"(MEL_TOKEN_%s, \"%.*ls\", %d:%d:%d)\n", token_str(token->type), token->length, token->cursor, token->line, token->position, token->length);
 }
 
-static void emit(mel_lexer_t *parser, mel_chunk_t *chunk, uint8_t byte) {
-    chunk_write(chunk, byte, parser->previous.line);
+static void emit(mel_lexer_t *lexer, mel_chunk_t *chunk, uint8_t byte) {
+    chunk_write(chunk, byte, lexer->previous.line);
 }
 
-static void emit_op(mel_lexer_t *parser, mel_chunk_t *chunk, uint8_t byte1, uint8_t byte2) {
-    emit(parser, chunk, byte1);
-    emit(parser, chunk, byte2);
+static void emit_constant(mel_lexer_t *lexer, mel_chunk_t *chunk, mel_value_t value) {
+    chunk_write_constant(chunk, value, lexer->previous.line);
 }
 
-static void emit_constant(mel_lexer_t *parser, mel_chunk_t *chunk, mel_value_t value) {
-    chunk_write_constant(chunk, value, parser->previous.line);
+static void emit_string(mel_lexer_t *lexer, mel_chunk_t *chunk) {
+    emit_constant(lexer, chunk, mel_obj(mel_string_new(lexer->current.cursor, lexer->current.length, false)));
 }
 
-static void emit_number(mel_lexer_t *parser, mel_chunk_t *chunk) {
+static void emit_number(mel_lexer_t *lexer, mel_chunk_t *chunk) {
     static char buf[513];
     memset(buf, 0, sizeof(char) * 513);
-    if (parser->current.length >= 512)
+    if (lexer->current.length >= 512)
         abort();
-    memcpy(buf, parser->cursor, parser->current.length);
-    buf[parser->current.length+1] = '\0';
+    memcpy(buf, lexer->cursor, lexer->current.length);
+    buf[lexer->current.length+1] = '\0';
     double value = strtod(buf, NULL);
-    emit_constant(parser, chunk, mel_number(value));
+    emit_constant(lexer, chunk, mel_number(value));
 }
+
+typedef enum precedence {
+    PREC_NONE,
+    PREC_EQUALITY,
+    PREC_COMPARISON,
+    PREC_TERM,
+    PREC_FACTOR,
+    PREC_CALL,
+    PREC_PRIMARY
+} precedence;
+
+typedef void(*rule_fn_t)(mel_lexer_t*, mel_chunk_t*);
+
+typedef struct rule {
+    rule_fn_t prefix;
+    rule_fn_t infix;
+    precedence precedence;
+} rule_t;
+
+static void number(mel_lexer_t *l, mel_chunk_t *chunk) {
+    char buf[l->previous.length+1];
+    for (int i = 0; i < l->previous.length; i++)
+        buf[i] = (char)*(l->cursor + i);
+    buf[l->previous.length] = '\0';
+    emit_constant(l, chunk, mel_number(strtod(buf, NULL)));
+}
+
+static void expression(mel_lexer_t *l, mel_chunk_t *chunk) {
+    
+}
+
+static void grouping(mel_lexer_t *l, mel_chunk_t *chunk) {
+    
+}
+
+rule_t rules[] = {
+    [MEL_TOKEN_ERROR]   = {NULL,     NULL,   PREC_NONE},
+    [MEL_TOKEN_EOF]     = {NULL,     NULL,   PREC_NONE},
+    [MEL_TOKEN_LPAREN]  = {grouping, NULL,   PREC_NONE},
+    [MEL_TOKEN_RPAREN]  = {NULL,     NULL,   PREC_NONE},
+    [MEL_TOKEN_STRING]  = {NULL,     NULL,   PREC_NONE},
+    [MEL_TOKEN_NUMBER]  = {number,   NULL,   PREC_NONE},
+    [MEL_TOKEN_AND]     = {NULL,     NULL,   PREC_NONE},
+    [MEL_TOKEN_FALSE]   = {NULL,     NULL,   PREC_NONE},
+    [MEL_TOKEN_IF]      = {NULL,     NULL,   PREC_NONE},
+    [MEL_TOKEN_NIL]     = {NULL,     NULL,   PREC_NONE},
+    [MEL_TOKEN_OR]      = {NULL,     NULL,   PREC_NONE},
+    [MEL_TOKEN_PRINT]   = {NULL,     NULL,   PREC_NONE},
+    [MEL_TOKEN_TRUE]    = {NULL,     NULL,   PREC_NONE},
+};
 
 static mel_result mel_compile(mel_lexer_t *lexer, mel_chunk_t *chunk) {
     for (;;) {
@@ -1147,17 +1228,33 @@ static mel_result mel_compile(mel_lexer_t *lexer, mel_chunk_t *chunk) {
             case MEL_TOKEN_ATOM:
                 break;
             case MEL_TOKEN_STRING:
-                emit_constant(lexer, chunk, mel_obj(mel_string_new(lexer->current.cursor, lexer->current.length, false)));
+                emit_string(lexer, chunk);
                 break;
             case MEL_TOKEN_NUMBER:
                 emit_number(lexer, chunk);
                 break;
+#define X(N, C) \
+case MEL_TOKEN_##N: \
+                BIN_OPS
+#undef X
             default:
                 break;
         }
         lexer->previous = lexer->current;
     }
     return MEL_COMPILE_ERROR;
+}
+
+static void vm_push(mel_vm_t *vm, mel_value_t value) {
+    garry_append(vm->stack, value);
+}
+
+static mel_value_t vm_pop(mel_vm_t *vm) {
+    if (!vm->stack)
+        return mel_nil();
+    mel_value_t ret = *(mel_value_t*)garry_last(vm->stack);
+    garry_pop(vm->stack);
+    return ret;
 }
 
 void mel_init(mel_vm_t *vm) {
@@ -1187,7 +1284,7 @@ mel_result mel_exec(mel_vm_t *vm, const unsigned char *str, int str_length) {
         return MEL_COMPILE_ERROR;
     chunk_disassemble(&chunk, "test");
     vm->chunk = &chunk;
-    vm->sp = vm->chunk->data;
+    vm->pc = vm->chunk->data;
     ret = MEL_OK;
 BAIL:
     lexer_free(&lexer);
