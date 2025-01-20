@@ -1,5 +1,11 @@
-(setq test
-    (if (> 5 4)
-        (print "こんにちは")
-        (progn
-            nil)))
+;; (setq ちんちん
+;;    (if (> 5 4)
+;;        (print "こんにちは")
+;;        (progn
+;;            nil)))
+
+5
+
+10
+
+15

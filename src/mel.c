@@ -8,7 +8,7 @@
 int main(int argc, const char *argv[]) {    
     mel_vm_t vm;
     mel_init(&vm);
-    if (mel_exec_file(&vm, "t/test.lisp") != MEL_OK)
+    if (mel_eval_file(&vm, "t/test.lisp") != MEL_OK)
         return 1;
     mel_destroy(&vm);
     return 0;

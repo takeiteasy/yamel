@@ -43,16 +43,12 @@ typedef struct {
     wchar_t *chars;
 } mel_string_t;
 
-typedef struct mel_chunk mel_chunk_t;
-
 typedef struct mel_vm {
-    mel_chunk_t *chunk;
     unsigned char *pc;
     mel_value_t *stack;
     mel_value_t current;
     mel_value_t previous;
     mel_object_t *objects;
-    char *error;
 } mel_vm_t;
 
 bool mel_object_is(mel_value_t value, mel_object_type type);
@@ -80,8 +76,8 @@ typedef enum mel_result {
 void mel_init(mel_vm_t *vm);
 void mel_destroy(mel_vm_t *vm);
 
-mel_result mel_exec(mel_vm_t *vm, const unsigned char *str, int str_length);
-mel_result mel_exec_file(mel_vm_t *vm, const char *path);
+mel_result mel_eval(mel_vm_t *vm, const unsigned char *str, int str_length);
+mel_result mel_eval_file(mel_vm_t *vm, const char *path);
 
 #ifdef __cplusplus
 }
@@ -683,13 +679,14 @@ typedef struct mel_chunk_range {
     int offset, line;
 } mel_chunk_range_t;
 
-struct mel_chunk {
+typedef struct mel_chunk {
     unsigned char *data;
     mel_value_t *constants;
     mel_chunk_range_t *lines;
-};
+} mel_chunk_t;
 
 typedef enum mel_op {
+    MEL_OP_EXIT,
     MEL_OP_RETURN,
     MEL_OP_CONSTANT,
     MEL_OP_CONSTANT_LONG
@@ -769,6 +766,8 @@ static int disassemble_instruction(mel_chunk_t *chunk, int offset) {
     switch (instruction) {
         case MEL_OP_RETURN:
             return simple_instruction("OP_RETURN", offset);
+        case MEL_OP_EXIT:
+            return simple_instruction("OP_EXIT", offset);
         case MEL_OP_CONSTANT:
             return constant_instruction("OP_CONSTANT", chunk, offset);
         case MEL_OP_CONSTANT_LONG:
@@ -813,18 +812,18 @@ static void chunk_write_constant(mel_chunk_t *chunk, mel_value_t value, int line
     X(CRPAREN, '}')
 
 #define PREFIX_CHARS \
-    X(SINGLE_QUOTE, '\'') \
-    X(BACK_QUOTE, '`') \
+    X(SQUOTE, '\'') \
+    X(BQUOTE, '`') \
     X(COMMA, ',') \
     X(ARROBA, '@') \
     X(HASH, '#') \
     X(SYMBOL, ':')
 
 #define PRIMITIVES \
-    X(TRUE, "TRUE") \
-    X(FALSE, "FALSE") \
+    X(TRUE, "T") \
     X(NIL, "NIL") \
     X(QUOTE, "QUOTE") \
+    X(UNQUOTE, "UNQUOTE") \
     X(SETQ, "SETQ") \
     X(PROGN, "PROGN") \
     X(IF, "IF") \
@@ -885,10 +884,10 @@ typedef struct mel_lexer {
     trie *primitives;
 } mel_lexer_t;
 
-static void lexer_init(mel_lexer_t *l, const unsigned char *str, int str_length) {
-    const wchar_t *wide_str = to_wide(str, str_length, NULL);
-    l->source = wide_str;
-    l->cursor = wide_str;
+static void lexer_init(mel_lexer_t *l, const wchar_t *str, int str_length) {
+    memset(l, 0, sizeof(mel_lexer_t));
+    l->source = str;
+    l->cursor = str;
     l->primitives = trie_create();
 #define X(N, S) \
     trie_insert(l->primitives, S);
@@ -897,8 +896,6 @@ static void lexer_init(mel_lexer_t *l, const unsigned char *str, int str_length)
 }
 
 static void lexer_free(mel_lexer_t *l) {
-    if (l->source)
-        free((void*)l->source);
     if (l->primitives)
         trie_destroy(l->primitives);
 }
@@ -1154,66 +1151,47 @@ static void emit_string(mel_lexer_t *lexer, mel_chunk_t *chunk) {
     emit_constant(lexer, chunk, mel_obj(mel_string_new(lexer->current.cursor, lexer->current.length, false)));
 }
 
-static void emit_number(mel_lexer_t *lexer, mel_chunk_t *chunk) {
-    static char buf[513];
-    memset(buf, 0, sizeof(char) * 513);
-    if (lexer->current.length >= 512)
-        abort();
-    memcpy(buf, lexer->cursor, lexer->current.length);
-    buf[lexer->current.length+1] = '\0';
-    double value = strtod(buf, NULL);
-    emit_constant(lexer, chunk, mel_number(value));
+static void emit_number(mel_lexer_t *l, mel_chunk_t *chunk) {
+    char buf[l->current.length+1];
+    for (int i = 0; i < l->current.length; i++)
+        buf[i] = (char)*(l->current.cursor + i);
+    buf[l->current.length] = '\0';
+    mel_value_t v = mel_number(strtod(buf, NULL));
+    emit_constant(l, chunk, v);
 }
 
-typedef enum precedence {
-    PREC_NONE,
-    PREC_EQUALITY,
-    PREC_COMPARISON,
-    PREC_TERM,
-    PREC_FACTOR,
-    PREC_CALL,
-    PREC_PRIMARY
-} precedence;
-
-typedef void(*rule_fn_t)(mel_lexer_t*, mel_chunk_t*);
-
-typedef struct rule {
-    rule_fn_t prefix;
-    rule_fn_t infix;
-    precedence precedence;
-} rule_t;
-
-static void number(mel_lexer_t *l, mel_chunk_t *chunk) {
-    char buf[l->previous.length+1];
-    for (int i = 0; i < l->previous.length; i++)
-        buf[i] = (char)*(l->cursor + i);
-    buf[l->previous.length] = '\0';
-    emit_constant(l, chunk, mel_number(strtod(buf, NULL)));
+static void mel_fprint(FILE *stream, mel_value_t v) {
+    switch (v.type) {
+        case MEL_VALUE_NIL:
+            fprintf(stream, "NIL\n");;
+            break;
+        case MEL_VALUE_BOOLEAN:
+            fprintf(stream, "%s\n", v.as.boolean ? "T" : "NIL");
+            break;
+        case MEL_VALUE_NUMBER:
+            fprintf(stream, "%g\n", v.as.number);
+            break;
+        case MEL_VALUE_OBJECT: {
+            mel_object_t *obj = mel_as_obj(v);
+            switch (obj->type) {
+                case MEL_OBJECT_STRING: {
+                    mel_string_t *str = (mel_string_t*)obj;
+                    fwprintf(stream, L"%.*ls", str->length, str->chars);
+                    break;
+                }
+                default:
+                    abort();
+            }
+            break;
+        }
+        default:
+            abort();
+    }
 }
 
-static void expression(mel_lexer_t *l, mel_chunk_t *chunk) {
-    
+static void mel_print(mel_value_t v) {
+    mel_fprint(stdout, v);
 }
-
-static void grouping(mel_lexer_t *l, mel_chunk_t *chunk) {
-    
-}
-
-rule_t rules[] = {
-    [MEL_TOKEN_ERROR]   = {NULL,     NULL,   PREC_NONE},
-    [MEL_TOKEN_EOF]     = {NULL,     NULL,   PREC_NONE},
-    [MEL_TOKEN_LPAREN]  = {grouping, NULL,   PREC_NONE},
-    [MEL_TOKEN_RPAREN]  = {NULL,     NULL,   PREC_NONE},
-    [MEL_TOKEN_STRING]  = {NULL,     NULL,   PREC_NONE},
-    [MEL_TOKEN_NUMBER]  = {number,   NULL,   PREC_NONE},
-    [MEL_TOKEN_AND]     = {NULL,     NULL,   PREC_NONE},
-    [MEL_TOKEN_FALSE]   = {NULL,     NULL,   PREC_NONE},
-    [MEL_TOKEN_IF]      = {NULL,     NULL,   PREC_NONE},
-    [MEL_TOKEN_NIL]     = {NULL,     NULL,   PREC_NONE},
-    [MEL_TOKEN_OR]      = {NULL,     NULL,   PREC_NONE},
-    [MEL_TOKEN_PRINT]   = {NULL,     NULL,   PREC_NONE},
-    [MEL_TOKEN_TRUE]    = {NULL,     NULL,   PREC_NONE},
-};
 
 static mel_result mel_compile(mel_lexer_t *lexer, mel_chunk_t *chunk) {
     for (;;) {
@@ -1223,22 +1201,24 @@ static mel_result mel_compile(mel_lexer_t *lexer, mel_chunk_t *chunk) {
             case MEL_TOKEN_ERROR:
                 return MEL_COMPILE_ERROR;
             case MEL_TOKEN_EOF:
-                emit(lexer, chunk, MEL_OP_RETURN);
+                emit(lexer, chunk, MEL_OP_EXIT);
                 return MEL_OK;
-            case MEL_TOKEN_ATOM:
+            case MEL_TOKEN_NUMBER:
+                emit_number(lexer, chunk);
+                emit(lexer, chunk, MEL_OP_RETURN);
                 break;
             case MEL_TOKEN_STRING:
                 emit_string(lexer, chunk);
+                emit(lexer, chunk, MEL_OP_RETURN);
                 break;
-            case MEL_TOKEN_NUMBER:
-                emit_number(lexer, chunk);
+            case MEL_TOKEN_LPAREN:
                 break;
-#define X(N, C) \
-case MEL_TOKEN_##N: \
-                BIN_OPS
-#undef X
+            case MEL_TOKEN_SLPAREN:
+                break;
+            case MEL_TOKEN_CLPAREN:
+                break;
             default:
-                break;
+                return MEL_COMPILE_ERROR; // unexpected token
         }
         lexer->previous = lexer->current;
     }
@@ -1257,6 +1237,26 @@ static mel_value_t vm_pop(mel_vm_t *vm) {
     return ret;
 }
 
+static mel_result mel_exec(mel_vm_t *vm, mel_chunk_t *chunk) {
+    if (!(vm->pc = chunk->data))
+        return MEL_RUNTIME_ERROR;
+    uint8_t inst;
+    while ((inst = *vm->pc++) != MEL_OP_EXIT)
+        switch (inst) {
+            case MEL_OP_EXIT:
+                return MEL_OK;
+            case MEL_OP_RETURN:
+                mel_print(vm_pop(vm));
+                garry_free(vm->stack);
+                break;
+            case MEL_OP_CONSTANT:
+            case MEL_OP_CONSTANT_LONG:
+                vm_push(vm, chunk->constants[*vm->pc++]);
+                break;
+        }
+    return MEL_OK;
+}
+
 void mel_init(mel_vm_t *vm) {
 #ifdef __APPLE__
     // XCode won't print wprintf otherwise...
@@ -1272,20 +1272,19 @@ void mel_destroy(mel_vm_t *vm) {
         garry_free(vm->stack);
 }
 
-mel_result mel_exec(mel_vm_t *vm, const unsigned char *str, int str_length) {
+mel_result mel_eval(mel_vm_t *vm, const unsigned char *str, int str_length) {
     mel_result ret = MEL_COMPILE_ERROR;
     if (!str || !str_length)
         goto BAIL;
-    mel_lexer_t lexer = {0};
-    lexer_init(&lexer, str, str_length);
+    const wchar_t *wstr = to_wide(str, str_length, &str_length);
+    mel_lexer_t lexer;
+    lexer_init(&lexer, wstr, str_length);
     mel_chunk_t chunk;
     chunk_init(&chunk);
-    if (mel_compile(&lexer, &chunk) != MEL_OK)
-        return MEL_COMPILE_ERROR;
+    if ((ret = mel_compile(&lexer, &chunk)) != MEL_OK)
+        goto BAIL;
     chunk_disassemble(&chunk, "test");
-    vm->chunk = &chunk;
-    vm->pc = vm->chunk->data;
-    ret = MEL_OK;
+    ret = mel_exec(vm, &chunk);
 BAIL:
     lexer_free(&lexer);
     chunk_free(&chunk);
@@ -1315,12 +1314,12 @@ BAIL:
     return result;
 }
 
-mel_result mel_exec_file(mel_vm_t *vm, const char *path) {
+mel_result mel_eval_file(mel_vm_t *vm, const char *path) {
     int src_length;
     const unsigned char *src = read_file(path, &src_length);
     if (!src || !src_length)
         return MEL_COMPILE_ERROR;
-    mel_result ret = mel_exec(vm, src, src_length);
+    mel_result ret = mel_eval(vm, src, src_length);
     free((void*)src);
     return ret;
 }
