@@ -54,12 +54,11 @@ typedef struct mel_vm {
 bool mel_object_is(mel_value_t value, mel_object_type type);
 mel_object_t* mel_obj_new(mel_object_type type, size_t size);
 void mel_obj_destroy(mel_object_t *obj);
-mel_string_t* mel_string_new(const wchar_t *str, int length, bool owns_chars);
+mel_string_t* mel_string_new(const wchar_t *str, int length);
 #define mel_is_string(VAL) (mel_object_is((VAL), MEL_OBJECT_STRING))
 #define mel_as_string(VAL) ((mel_string_t*)mel_as_obj((VAL)))
 #define mel_as_cstring(VAL) ((mel_as_string((VAL)))->chars)
 #define mel_string_length(VAL) ((mel_as_string((VAL)))->length)
-void mel_print_value(mel_value_t value);
 
 mel_value_t mel_nil(void);
 #define X(T, N, TYPE) \
@@ -72,6 +71,9 @@ typedef enum mel_result {
     MEL_COMPILE_ERROR,
     MEL_RUNTIME_ERROR
 } mel_result;
+
+void mel_fprint(FILE *stream, mel_value_t v);
+void mel_print(mel_value_t v);
 
 void mel_init(mel_vm_t *vm);
 void mel_destroy(mel_vm_t *vm);
@@ -633,7 +635,7 @@ void mel_obj_destroy(mel_object_t *obj) {
     }
 }
 
-mel_string_t* mel_string_new(const wchar_t *chars, int length, bool owns_chars) {
+mel_string_t* mel_string_new(const wchar_t *chars, int length) {
     mel_string_t *result = malloc(sizeof(mel_string_t));
     if (!result)
         return NULL;
@@ -646,33 +648,6 @@ mel_string_t* mel_string_new(const wchar_t *chars, int length, bool owns_chars) 
     memcpy(result->chars, chars, length * sizeof(wchar_t));
     result->chars[length] = L'\0';
     return result;
-}
-
-void mel_print_value(mel_value_t value) {
-    switch (value.type) {
-        case MEL_VALUE_NIL:
-            printf("NIL");
-            break;
-        case MEL_VALUE_BOOLEAN:
-            printf("%s", value.as.boolean ? "T" : "NIL");
-            break;
-        case MEL_VALUE_NUMBER:
-            printf("%g", mel_as_number(value));
-            break;
-        case MEL_VALUE_OBJECT: {
-            mel_object_t *obj = mel_as_obj(value);
-            switch (obj->type) {
-                case MEL_OBJECT_STRING:
-                    wprintf(L"\"%.*ls\"", mel_string_length(value), mel_as_cstring(value));
-                    break;
-                default:
-                    abort();
-            }
-            break;
-        }
-        default:
-            abort();
-    }
 }
 
 typedef struct mel_chunk_range {
@@ -737,7 +712,7 @@ static int get_line(mel_chunk_t *chunk, int instruction) {
 static int constant_instruction(const char *name, mel_chunk_t *chunk, int offset) {
     uint8_t c = chunk->data[offset + 1];
     printf("%-16s %4d '", name, c);
-    mel_print_value(chunk->constants[c]);
+    mel_print(chunk->constants[c]);
     printf("'\n");
     return offset + 2;
 }
@@ -745,7 +720,7 @@ static int constant_instruction(const char *name, mel_chunk_t *chunk, int offset
 static int long_constant_instruction(const char *name, mel_chunk_t *chunk, int offset) {
     uint32_t c = chunk->data[offset + 1] | (chunk->data[offset + 2] << 8) | (chunk->data[offset + 3] << 16);
     printf("%-16s %4d '", name, c);
-    mel_print_value(chunk->constants[c]);
+    mel_print(chunk->constants[c]);
     printf("'\n");
     return offset + 4;
 }
@@ -1148,7 +1123,7 @@ static void emit_constant(mel_lexer_t *lexer, mel_chunk_t *chunk, mel_value_t va
 }
 
 static void emit_string(mel_lexer_t *lexer, mel_chunk_t *chunk) {
-    emit_constant(lexer, chunk, mel_obj(mel_string_new(lexer->current.cursor, lexer->current.length, false)));
+    emit_constant(lexer, chunk, mel_obj(mel_string_new(lexer->current.cursor, lexer->current.length)));
 }
 
 static void emit_number(mel_lexer_t *l, mel_chunk_t *chunk) {
@@ -1160,7 +1135,7 @@ static void emit_number(mel_lexer_t *l, mel_chunk_t *chunk) {
     emit_constant(l, chunk, v);
 }
 
-static void mel_fprint(FILE *stream, mel_value_t v) {
+void mel_fprint(FILE *stream, mel_value_t v) {
     switch (v.type) {
         case MEL_VALUE_NIL:
             fprintf(stream, "NIL\n");;
@@ -1176,7 +1151,7 @@ static void mel_fprint(FILE *stream, mel_value_t v) {
             switch (obj->type) {
                 case MEL_OBJECT_STRING: {
                     mel_string_t *str = (mel_string_t*)obj;
-                    fwprintf(stream, L"%.*ls", str->length, str->chars);
+                    fwprintf(stream, L"%.*ls\n", str->length, str->chars);
                     break;
                 }
                 default:
@@ -1189,8 +1164,23 @@ static void mel_fprint(FILE *stream, mel_value_t v) {
     }
 }
 
-static void mel_print(mel_value_t v) {
+void mel_print(mel_value_t v) {
     mel_fprint(stdout, v);
+}
+
+static mel_token_t lexer_consume(mel_lexer_t *lexer) {
+    lexer->previous = lexer->current;
+    lexer->current = next_token(lexer);
+    return lexer->current;
+}
+
+static mel_result expression(mel_lexer_t *lexer, mel_chunk_t *chunk) {
+    mel_token_t token = lexer_consume(lexer);
+    switch (token.type) {
+        default:
+            return MEL_COMPILE_ERROR; // unexpected token
+    }
+    return MEL_OK;
 }
 
 static mel_result mel_compile(mel_lexer_t *lexer, mel_chunk_t *chunk) {
@@ -1212,11 +1202,35 @@ static mel_result mel_compile(mel_lexer_t *lexer, mel_chunk_t *chunk) {
                 emit(lexer, chunk, MEL_OP_RETURN);
                 break;
             case MEL_TOKEN_LPAREN:
+                if (!expression(lexer, chunk))
+                    return MEL_COMPILE_ERROR;
                 break;
             case MEL_TOKEN_SLPAREN:
                 break;
             case MEL_TOKEN_CLPAREN:
                 break;
+#define X(N, S) \
+            case MEL_TOKEN_##N: { \
+                int wlen; \
+                emit_constant(lexer, chunk, \
+                    mel_obj(mel_string_new(to_wide((const unsigned char*)(":KEYWORD-" S), strlen((":KEYWORD-" S)), &wlen), wlen))); \
+                emit(lexer, chunk, MEL_OP_RETURN); \
+                break; \
+            }
+                PRIMITIVES
+#undef X
+#define X(N, C) \
+            case MEL_TOKEN_##N: { \
+                char b[11] = ":KEYWORD-"; \
+                b[9] = C; \
+                b[10] = '\0'; \
+                int wlen; \
+                emit_constant(lexer, chunk, \
+                mel_obj(mel_string_new(to_wide((const unsigned char*)b, 11, &wlen), wlen))); \
+                emit(lexer, chunk, MEL_OP_RETURN); \
+            }
+                BIN_OPS
+#undef X
             default:
                 return MEL_COMPILE_ERROR; // unexpected token
         }
