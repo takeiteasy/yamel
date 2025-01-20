@@ -1,5 +1,26 @@
 # mel
 
+## Goals
+
+- JIT compilation
+    - Maybe AOT too if I finish it
+- Common Lisp flavour
+    - `(let ((a b) (c d)) ...)`
+    - Not an implementation of Common Lisp
+    - string, number, arrays, hash-table, etc
+    - `[...]` is for new arrays
+    - `{...}` is for new hash-tables
+- No structs/classes
+    - Lua-like metatable "classes" over hash-table
+    - defclass macro in stdlib
+- Full UTF-8 support
+    - Strings, variable names, functions, etc
+- Single-header + small as possible
+    - Most "features" will go in the stdlib written in mel
+    - Keep implementation as clutter-free as possible
+- Try to be as portable as possible
+    - Probably after first final release
+
 ## LICENSE
 ```
 mini embeddable lisp

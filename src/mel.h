@@ -664,7 +664,10 @@ typedef enum mel_op {
     MEL_OP_EXIT,
     MEL_OP_RETURN,
     MEL_OP_CONSTANT,
-    MEL_OP_CONSTANT_LONG
+    MEL_OP_CONSTANT_LONG,
+#define X(N, _) MEL_OP_##N = MEL_TOKEN_##N,
+    BIN_OPS
+#undef X
 } mel_op;
 
 static void chunk_init(mel_chunk_t *chunk) {
@@ -1174,15 +1177,6 @@ static mel_token_t lexer_consume(mel_lexer_t *lexer) {
     return lexer->current;
 }
 
-static mel_result expression(mel_lexer_t *lexer, mel_chunk_t *chunk) {
-    mel_token_t token = lexer_consume(lexer);
-    switch (token.type) {
-        default:
-            return MEL_COMPILE_ERROR; // unexpected token
-    }
-    return MEL_OK;
-}
-
 static mel_result mel_compile(mel_lexer_t *lexer, mel_chunk_t *chunk) {
     for (;;) {
         lexer->current = next_token(lexer);
@@ -1202,8 +1196,7 @@ static mel_result mel_compile(mel_lexer_t *lexer, mel_chunk_t *chunk) {
                 emit(lexer, chunk, MEL_OP_RETURN);
                 break;
             case MEL_TOKEN_LPAREN:
-                if (!expression(lexer, chunk))
-                    return MEL_COMPILE_ERROR;
+                lexer_consume(lexer);
                 break;
             case MEL_TOKEN_SLPAREN:
                 break;
