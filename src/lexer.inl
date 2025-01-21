@@ -1,65 +1,20 @@
-#define SIMPLE_CHARS \
-    X(PERIOD, '.') \
-    X(LPAREN, '(') \
-    X(RPAREN, ')') \
-    X(SLPAREN, '[') \
-    X(SRPAREN, ']') \
-    X(CLPAREN, '{') \
-    X(CRPAREN, '}')
-
-#define PREFIX_CHARS \
-    X(SQUOTE, '\'') \
-    X(BQUOTE, '`') \
-    X(COMMA, ',') \
-    X(ARROBA, '@') \
-    X(HASH, '#') \
-    X(SYMBOL, ':')
-
-#define PRIMITIVES \
-    X(TRUE, "T") \
-    X(NIL, "NIL") \
-    X(QUOTE, "QUOTE") \
-    X(UNQUOTE, "UNQUOTE") \
-    X(SETQ, "SETQ") \
-    X(PROGN, "PROGN") \
-    X(IF, "IF") \
-    X(COND, "COND") \
-    X(LAMBDA, "LAMBDA") \
-    X(MACRO, "MACRO") \
-    X(EQ, "EQ") \
-    X(CAR, "CAR") \
-    X(CDR, "CDR") \
-    X(CONS, "CONS") \
-    X(PRINT, "PRINT") \
-    X(AND, "AND") \
-    X(OR, "OR") \
-    X(LT_EQ, "<=") \
-    X(GT_EQ, ">=")
-
-#define BIN_OPS \
-    X(ADD, '+') \
-    X(SUB, '-') \
-    X(MUL, '*') \
-    X(DIV, '/') \
-    X(LT,  '<') \
-    X(GT,  '>')
-
 typedef enum mel_token_type {
     MEL_TOKEN_ERROR = 0,
     MEL_TOKEN_EOF,
     MEL_TOKEN_ATOM,
     MEL_TOKEN_NUMBER,
     MEL_TOKEN_STRING,
-#define X(N, _) \
-    MEL_TOKEN_##N,
-    PRIMITIVES
-#undef X
-#define X(N, C) \
-    MEL_TOKEN_##N = C,
-    SIMPLE_CHARS
-    PREFIX_CHARS
-    BIN_OPS
-#undef X
+    MEL_TOKEN_LPAREN = '(',
+    MEL_TOKEN_RPAREN = ')',
+    MEL_TOKEN_SQR_LPAREN = '[',
+    MEL_TOKEN_SQR_RPAREN = ']',
+    MEL_TOKEN_CRL_LPAREN = '{',
+    MEL_TOKEN_CRL_RPAREN = '}',
+    MEL_TOKEN_SINGLE_QUOTE = '\'',
+    MEL_TOKEN_BACK_QUOTE = '`',
+    MEL_TOKEN_AT = '@',
+    MEL_TOKEN_HASH = '#',
+    MEL_TOKEN_COLON = ','
 } mel_token_type;
 
 typedef struct mel_token {
@@ -77,23 +32,16 @@ typedef struct mel_lexer {
     int line_position;
     mel_token_t current;
     mel_token_t previous;
-    trie *primitives;
 } mel_lexer_t;
 
 static void lexer_init(mel_lexer_t *l, const wchar_t *str, int str_length) {
     memset(l, 0, sizeof(mel_lexer_t));
     l->source = str;
     l->cursor = str;
-    l->primitives = trie_create();
-#define X(N, S) \
-    trie_insert(l->primitives, S);
-    PRIMITIVES
-#undef X
 }
 
 static void lexer_free(mel_lexer_t *l) {
-    if (l->primitives)
-        trie_destroy(l->primitives);
+    
 }
 
 static wchar_t lexer_peek(mel_lexer_t *p) {
@@ -185,16 +133,29 @@ static int is_whitespace(wchar_t c) {
     }
 }
 
+#define TERMINATORS \
+    X('.') \
+    X('(') \
+    X(')') \
+    X('[') \
+    X(']') \
+    X('{') \
+    X('}') \
+    X('\'') \
+    X('`') \
+    X(',') \
+    X('@') \
+    X('#') \
+    X(':') \
+    X('"')
+
 static int lexer_peek_terminators(mel_lexer_t *p) {
     switch (lexer_peek(p)) {
-#define X(C) case C:
-            WHITESPACE
-#undef X
-#define X(_, C) \
+#define X(C) \
         case C:
-            SIMPLE_CHARS
+            WHITESPACE
+            TERMINATORS
 #undef X
-        case '"':
             return 1;
         default:
             return 0;
@@ -251,16 +212,6 @@ static mel_token_type identify(mel_lexer_t *l) {
         buf[i] = toupper(*(l->source + i));
     buf[len] = '\0';
     mel_token_type ret = MEL_TOKEN_ATOM;
-    int found = trie_find(l->primitives, buf);
-    if (!found)
-        goto BAIL;
-#define X(N, S) \
-    if (!strncmp(buf, S, len)) { \
-        ret = MEL_TOKEN_##N; \
-        goto BAIL; \
-    }
-    PRIMITIVES
-#undef X
 BAIL:
     if (buf)
         free(buf);
@@ -292,25 +243,25 @@ static mel_token_t next_token(mel_lexer_t *p) {
             return read_string(p);
         case '0' ... '9':
             return read_number(p);
-#define X(N, _) \
-        case MEL_TOKEN_##N:
-            PREFIX_CHARS
-#undef X
-            if (is_whitespace(lexer_next(p)))
-                return TOKEN(MEL_TOKEN_ERROR);
-#define X(N, _) \
-        case MEL_TOKEN_##N:
-            SIMPLE_CHARS
-            BIN_OPS
-#undef X
-            return single_token(p, (mel_token_type)c);
+        case '(':
+        case ')':
+        case '[':
+        case ']':
+        case '{':
+        case '}':
+        case '\'':
+        case '`':
+        case '@':
+        case '#':
+        case ',':
+            return TOKEN((mel_token_type)lexer_advance(p));
         default:
             return read_atom(p);
     }
     return TOKEN(MEL_TOKEN_ERROR);
 }
 
-static const char *token_str(mel_token_type type) {
+static const char *token_type_str(mel_token_type type) {
     switch (type) {
         case MEL_TOKEN_ERROR:
             return "ERROR";
@@ -322,40 +273,33 @@ static const char *token_str(mel_token_type type) {
             return "NUMBER";
         case MEL_TOKEN_STRING:
             return "STRING";
-#define X(N, _) \
-        case MEL_TOKEN_##N:\
-            return #N;
-            SIMPLE_CHARS
-            PREFIX_CHARS
-            PRIMITIVES
-            BIN_OPS
-#undef X
+        case MEL_TOKEN_LPAREN:
+            return "LEFT_PAREN";
+        case MEL_TOKEN_RPAREN:
+            return "RIGHT_PAREN";
+        case MEL_TOKEN_SQR_LPAREN:
+            return "LEFT_SQUARE_PAREN";
+        case MEL_TOKEN_SQR_RPAREN:
+            return "RIGHT_SQUARE_PAREN";
+        case MEL_TOKEN_CRL_LPAREN:
+            return "LEFT_CURLY_PAREN";
+        case MEL_TOKEN_CRL_RPAREN:
+            return "RIGHT_CURLY_PAREN";
+        case MEL_TOKEN_SINGLE_QUOTE:
+            return "SINGLE_QUOTE";
+        case MEL_TOKEN_BACK_QUOTE:
+            return "BACK_QUOTE";
+        case MEL_TOKEN_AT:
+            return "AT";
+        case MEL_TOKEN_HASH:
+            return "HASH";
+        case MEL_TOKEN_COLON:
+            return "COLON";
     }
 }
 
 static void print_token(mel_token_t *token) {
-    wprintf(L"(MEL_TOKEN_%s, \"%.*ls\", %d:%d:%d)\n", token_str(token->type), token->length, token->cursor, token->line, token->position, token->length);
-}
-
-static void emit(mel_lexer_t *lexer, mel_chunk_t *chunk, uint8_t byte) {
-    chunk_write(chunk, byte, lexer->previous.line);
-}
-
-static void emit_constant(mel_lexer_t *lexer, mel_chunk_t *chunk, mel_value_t value) {
-    chunk_write_constant(chunk, value, lexer->previous.line);
-}
-
-static void emit_string(mel_lexer_t *lexer, mel_chunk_t *chunk) {
-    emit_constant(lexer, chunk, mel_obj(mel_string_new(lexer->current.cursor, lexer->current.length)));
-}
-
-static void emit_number(mel_lexer_t *l, mel_chunk_t *chunk) {
-    char buf[l->current.length+1];
-    for (int i = 0; i < l->current.length; i++)
-        buf[i] = (char)*(l->current.cursor + i);
-    buf[l->current.length] = '\0';
-    mel_value_t v = mel_number(strtod(buf, NULL));
-    emit_constant(l, chunk, v);
+    wprintf(L"(MEL_TOKEN_%s, \"%.*ls\", %d:%d:%d)\n", token_type_str(token->type), token->length, token->cursor, token->line, token->position, token->length);
 }
 
 static mel_token_t lexer_consume(mel_lexer_t *lexer) {

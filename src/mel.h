@@ -125,9 +125,7 @@ mel_result mel_eval_file(mel_vm_t *vm, const char *path);
 
 #include "utils.inl"
 #include "types.inl"
-#include "chunk.inl"
 #include "lexer.inl"
-#include "compiler.inl"
 
 void mel_fprint(FILE *stream, mel_value_t v) {
     switch (v.type) {
@@ -184,15 +182,19 @@ mel_result mel_eval(mel_vm_t *vm, const unsigned char *str, int str_length) {
     const wchar_t *wstr = to_wide(str, str_length, &str_length);
     mel_lexer_t lexer;
     lexer_init(&lexer, wstr, str_length);
-    mel_chunk_t chunk;
-    chunk_init(&chunk);
-    if ((ret = mel_compile(&lexer, &chunk)) != MEL_OK)
-        goto BAIL;
-    chunk_disassemble(&chunk, "test");
-    ret = mel_exec(vm, &chunk);
+    for (;;) {
+        lexer_consume(&lexer);
+        switch (lexer.current.type) {
+            case MEL_TOKEN_ERROR:
+            case MEL_TOKEN_EOF:
+                goto BAIL;
+            default:
+                print_token(&lexer.current);
+                break;
+        }
+    }
 BAIL:
     lexer_free(&lexer);
-    chunk_free(&chunk);
     return ret;
 }
 
