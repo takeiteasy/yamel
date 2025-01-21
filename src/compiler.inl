@@ -1,12 +1,107 @@
 typedef struct mel_local {
-    
+    mel_token_t *token;
+    int depth;
 } mel_local_t;
 
 typedef struct mel_compiler {
-    
+    mel_lexer_t *lexer;
+    mel_chunk_t *chunk;
+    struct {
+        mel_local_t *locals;
+        int depth;
+    } scope;
 } mel_compiler_t;
 
+static inline mel_token_t* compiler_peek(mel_compiler_t *cmp) {
+    return &cmp->lexer->current;
+}
+
+static inline int compiler_check(mel_compiler_t *cmp, mel_token_type type) {
+    mel_token_t *token = compiler_peek(cmp);
+    return token ? token->type == type : 0;
+}
+
+static inline void scope_begin(mel_compiler_t *cmp) {
+    cmp->scope.depth++;
+}
+
+static inline void scope_end(mel_compiler_t *cmp) {
+    cmp->scope.depth--;
+}
+
+static mel_result block(mel_compiler_t *cmp) {
+    mel_token_t first = lexer_consume(cmp->lexer);
+    switch (first.type) {
+        case MEL_TOKEN_QUOTE:
+            break;
+        case MEL_TOKEN_UNQUOTE:
+            break;
+        case MEL_TOKEN_SETQ:
+            break;
+        case MEL_TOKEN_PROGN:
+            break;
+        case MEL_TOKEN_IF:
+            break;
+        case MEL_TOKEN_COND:
+            break;
+        case MEL_TOKEN_LAMBDA:
+            break;
+        case MEL_TOKEN_MACRO:
+            break;
+        case MEL_TOKEN_EQ:
+            break;
+        case MEL_TOKEN_CAR:
+            break;
+        case MEL_TOKEN_CDR:
+            break;
+        case MEL_TOKEN_CONS:
+            break;
+        case MEL_TOKEN_PRINT:
+            break;
+        case MEL_TOKEN_AND:
+            break;
+        case MEL_TOKEN_OR:
+            break;
+        case MEL_TOKEN_LT_EQ:
+            break;
+        case MEL_TOKEN_GT_EQ:
+            break;
+        case MEL_TOKEN_PERIOD:
+            break;
+        case MEL_TOKEN_ADD:
+            break;
+        case MEL_TOKEN_SUB:
+            break;
+        case MEL_TOKEN_MUL:
+            break;
+        case MEL_TOKEN_DIV:
+            break;
+        case MEL_TOKEN_LT:
+            break;
+        case MEL_TOKEN_GT:
+            break;
+        case MEL_TOKEN_ATOM:
+            break;
+        default:
+            return MEL_COMPILE_ERROR; // unexpected token
+    }
+    while (compiler_peek(cmp) &&
+           !compiler_check(cmp, MEL_TOKEN_EOF) &&
+           !compiler_check(cmp, MEL_TOKEN_RPAREN))
+        lexer_consume(cmp->lexer);
+    if (!compiler_check(cmp, MEL_TOKEN_RPAREN))
+        return MEL_COMPILE_ERROR; // expected closing )
+    lexer_consume(cmp->lexer);
+    return MEL_OK;
+}
+
 static mel_result mel_compile(mel_lexer_t *lexer, mel_chunk_t *chunk) {
+    mel_compiler_t compiler = {
+        .lexer = lexer,
+        .chunk = chunk,
+        .scope = {0}
+    };
+    
     for (;;) {
         lexer->current = next_token(lexer);
         print_token(&lexer->current);
@@ -26,6 +121,7 @@ static mel_result mel_compile(mel_lexer_t *lexer, mel_chunk_t *chunk) {
                 break;
             case MEL_TOKEN_LPAREN:
                 lexer_consume(lexer);
+                block(&compiler);
                 break;
             case MEL_TOKEN_SLPAREN:
                 break;

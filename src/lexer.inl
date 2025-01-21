@@ -26,7 +26,6 @@
     X(COND, "COND") \
     X(LAMBDA, "LAMBDA") \
     X(MACRO, "MACRO") \
-    X(ATOM, "ATOM") \
     X(EQ, "EQ") \
     X(CAR, "CAR") \
     X(CDR, "CDR") \
@@ -48,6 +47,7 @@
 typedef enum mel_token_type {
     MEL_TOKEN_ERROR = 0,
     MEL_TOKEN_EOF,
+    MEL_TOKEN_ATOM,
     MEL_TOKEN_NUMBER,
     MEL_TOKEN_STRING,
 #define X(N, _) \
@@ -316,6 +316,8 @@ static const char *token_str(mel_token_type type) {
             return "ERROR";
         case MEL_TOKEN_EOF:
             return "EOF";
+        case MEL_TOKEN_ATOM:
+            return "ATOM";
         case MEL_TOKEN_NUMBER:
             return "NUMBER";
         case MEL_TOKEN_STRING:
@@ -359,5 +361,5 @@ static void emit_number(mel_lexer_t *l, mel_chunk_t *chunk) {
 static mel_token_t lexer_consume(mel_lexer_t *lexer) {
     lexer->previous = lexer->current;
     lexer->current = next_token(lexer);
-    return lexer->current;
+    return lexer->previous;
 }

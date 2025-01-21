@@ -67,7 +67,7 @@ typedef struct mel_vm {
     mel_value_t *stack;
     mel_value_t current;
     mel_value_t previous;
-    mel_object_t *objects;
+    mel_table_t *globals;
 } mel_vm_t;
 
 bool mel_object_is(mel_value_t value, mel_object_type type);

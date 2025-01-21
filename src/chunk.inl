@@ -13,6 +13,7 @@ typedef enum mel_op {
     MEL_OP_RETURN,
     MEL_OP_CONSTANT,
     MEL_OP_CONSTANT_LONG,
+    MEL_OP_EVAL,
 #define X(N, _) MEL_OP_##N = MEL_TOKEN_##N,
     BIN_OPS
 #undef X
