@@ -46,8 +46,6 @@ typedef struct {
     wchar_t *chars;
 } mel_string_t;
 
-typedef struct int_map unordered_map_t;
-
 typedef struct mel_table {
     mel_object_t obj;
     size_t cap;
@@ -78,8 +76,8 @@ void mel_obj_destroy(mel_object_t *obj);
 mel_string_t* mel_string_new(const wchar_t *str, int length);
 #define mel_is_string(VAL) (mel_object_is((VAL), MEL_OBJECT_STRING))
 #define mel_as_string(VAL) ((mel_string_t*)mel_as_obj((VAL)))
-#define mel_as_cstring(VAL) ((mel_as_string((VAL)))->chars)
-#define mel_string_length(VAL) ((mel_as_string((VAL)))->length)
+const wchar_t* mel_string_cstr(mel_value_t melv);
+int mel_string_length(mel_value_t melv);
 mel_table_t* mel_table_new(void);
 #define mel_is_table(VAL) (mel_object_is((VAL), MEL_OBJECT_TABLE))
 #define mel_as_table(VAL) ((mel_table_t*)mel_as_obj((VAL)))
@@ -124,7 +122,6 @@ mel_result mel_eval_file(mel_vm_t *vm, const char *path);
 #include <locale.h>
 #include <stdbool.h>
 #include <assert.h>
-#include <time.h>
 
 #include "utils.inl"
 #include "types.inl"
