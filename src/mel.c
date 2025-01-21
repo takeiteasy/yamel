@@ -5,7 +5,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-int main(int argc, const char *argv[]) {    
+int main(int argc, const char *argv[]) {
     mel_vm_t vm;
     mel_init(&vm);
     if (mel_eval_file(&vm, "t/test.lisp") != MEL_OK)

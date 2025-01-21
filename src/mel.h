@@ -5,6 +5,8 @@ extern "C" {
 #endif
 #include <wchar.h>
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
 typedef double mel_float;
 
@@ -30,7 +32,8 @@ typedef struct {
 } mel_value_t;
 
 typedef enum mel_object_type {
-    MEL_OBJECT_STRING
+    MEL_OBJECT_STRING,
+    MEL_OBJECT_TABLE
 } mel_object_type;
 
 typedef struct mel_object {
@@ -42,6 +45,24 @@ typedef struct {
     int length;
     wchar_t *chars;
 } mel_string_t;
+
+typedef struct int_map unordered_map_t;
+
+typedef struct mel_table {
+    mel_object_t obj;
+    size_t cap;
+    size_t bucketsz;
+    size_t nbuckets;
+    size_t count;
+    size_t mask;
+    size_t growat;
+    size_t shrinkat;
+    uint8_t loadfactor;
+    uint8_t growpower;
+    void *buckets;
+    void *spare;
+    void *edata;
+} mel_table_t;
 
 typedef struct mel_vm {
     unsigned char *pc;
@@ -59,6 +80,14 @@ mel_string_t* mel_string_new(const wchar_t *str, int length);
 #define mel_as_string(VAL) ((mel_string_t*)mel_as_obj((VAL)))
 #define mel_as_cstring(VAL) ((mel_as_string((VAL)))->chars)
 #define mel_string_length(VAL) ((mel_as_string((VAL)))->length)
+mel_table_t* mel_table_new(void);
+#define mel_is_table(VAL) (mel_object_is((VAL), MEL_OBJECT_TABLE))
+#define mel_as_table(VAL) ((mel_table_t*)mel_as_obj((VAL)))
+int mel_table_set(mel_value_t melv, const wchar_t *key, mel_value_t val);
+mel_value_t* mel_table_get(mel_value_t melv, const wchar_t *key);
+int mel_table_del(mel_value_t melv, const wchar_t *key);
+void mel_table_clear(mel_value_t melv);
+int mel_table_count(mel_value_t melv);
 
 mel_value_t mel_nil(void);
 #define X(T, N, TYPE) \
@@ -94,6 +123,8 @@ mel_result mel_eval_file(mel_vm_t *vm, const char *path);
 #include <wchar.h>
 #include <locale.h>
 #include <stdbool.h>
+#include <assert.h>
+#include <time.h>
 
 #include "utils.inl"
 #include "types.inl"
@@ -104,7 +135,7 @@ mel_result mel_eval_file(mel_vm_t *vm, const char *path);
 void mel_fprint(FILE *stream, mel_value_t v) {
     switch (v.type) {
         case MEL_VALUE_NIL:
-            fprintf(stream, "NIL\n");;
+            fprintf(stream, "NIL\n");
             break;
         case MEL_VALUE_BOOLEAN:
             fprintf(stream, "%s\n", v.as.boolean ? "T" : "NIL");
